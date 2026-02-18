@@ -99,16 +99,25 @@ class DeepSeekV3Attention(nn.Module):
         k_rope = self.k_rope_proj(hidden_states)
         k_rope = k_rope.view(bsz, q_len, self.num_heads, self.qk_rope_head_dim).transpose(1, 2)
         
-        # Step 4: Apply RoPE to decoupled parts
+        # Step 4: KV Caching - we cache the latent kv_latent and k_rope instead of exploded tensors
+        # Actually in original MLA, it's more efficient to cache kv_latent
+        # But for this implementation, we'll cache the decomposed parts for simplicity
+        if past_key_value is not None:
+            prev_k_nope, prev_k_rope, prev_v = past_key_value
+            k_nope = torch.cat([prev_k_nope, k_nope], dim=2)
+            k_rope = torch.cat([prev_k_rope, k_rope], dim=2)
+            v = torch.cat([prev_v, v], dim=2)
+        
+        past_key_value = (k_nope, k_rope, v)
+        
+        # Step 5: Apply RoPE to decoupled parts
         q_rope, k_rope = apply_rotary_pos_emb(q_rope, k_rope, self.cos, self.sin, position_ids)
         
-        # Step 5: Construct final Q and K
-        # Query: [bsz, num_heads, q_len, qk_nope_head_dim + qk_rope_head_dim]
-        # Key:   [bsz, num_heads, q_len, qk_nope_head_dim + qk_rope_head_dim]
+        # Step 6: Construct final Q and K
         full_q = torch.cat([q_nope, q_rope], dim=-1)
         full_k = torch.cat([k_nope, k_rope], dim=-1)
         
-        # Step 6: Attention calculation
+        # Step 7: Attention calculation
         attn_weights = torch.matmul(full_q, full_k.transpose(-1, -2)) / math.sqrt(self.qk_nope_head_dim + self.qk_rope_head_dim)
         
         if attention_mask is not None:
@@ -120,4 +129,4 @@ class DeepSeekV3Attention(nn.Module):
         attn_output = attn_output.transpose(1, 2).reshape(bsz, q_len, self.num_heads * self.config.v_head_dim)
         attn_output = self.o_proj(attn_output)
         
-        return attn_output, None  # Simplification: not returning kv_cache for now
+        return attn_output, past_key_value
