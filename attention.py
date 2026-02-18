@@ -113,18 +113,23 @@ class DeepSeekV3Attention(nn.Module):
         # Step 5: Apply RoPE to decoupled parts
         q_rope, k_rope = apply_rotary_pos_emb(q_rope, k_rope, self.cos, self.sin, position_ids)
         
-        # Step 6: Construct final Q and K
-        full_q = torch.cat([q_nope, q_rope], dim=-1)
-        full_k = torch.cat([k_nope, k_rope], dim=-1)
+        # Step 7: Attention calculation using SDPA
+        # full_q: [bsz, num_heads, q_len, qk_nope_head_dim + qk_rope_head_dim]
+        # full_k: [bsz, num_heads, kv_len, qk_nope_head_dim + qk_rope_head_dim]
+        # v:      [bsz, num_heads, kv_len, v_head_dim]
         
-        # Step 7: Attention calculation
-        attn_weights = torch.matmul(full_q, full_k.transpose(-1, -2)) / math.sqrt(self.qk_nope_head_dim + self.qk_rope_head_dim)
+        # SDPA expects [bsz, num_heads, seq_len, head_dim]
+        # We need to handle the attention_mask carefully if it's provided as a bias
+        # SDPA's is_causal parameter can be used if appropriate, but here we use the mask
         
-        if attention_mask is not None:
-            attn_weights = attn_weights + attention_mask
-            
-        attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(q.dtype)
-        attn_output = torch.matmul(attn_weights, v)
+        attn_output = F.scaled_dot_product_attention(
+            full_q, 
+            full_k, 
+            v, 
+            attn_mask=attention_mask,
+            dropout_p=0.0 if not self.training else self.config.attention_dropout,
+            is_causal=False if attention_mask is not None else True
+        )
         
         attn_output = attn_output.transpose(1, 2).reshape(bsz, q_len, self.num_heads * self.config.v_head_dim)
         attn_output = self.o_proj(attn_output)
